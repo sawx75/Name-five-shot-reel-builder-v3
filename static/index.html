@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>5-Shot Reel Builder</title>
+  <style>
+    :root {
+      --bg:#101318; --panel:#181d25; --panel2:#202633; --text:#f2f5f8;
+      --muted:#aeb8c6; --good:#55d987; --warn:#ffd166; --bad:#ff6b6b; --accent:#7cc7ff;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:Arial,Helvetica,sans-serif;background:radial-gradient(circle at top,#1c2533 0,var(--bg) 45%);color:var(--text)}
+    header{text-align:center;padding:24px 18px 12px}
+    h1{margin:0 0 8px;font-size:clamp(1.7rem,4vw,3rem)}
+    .subtitle{color:var(--muted);max-width:940px;margin:0 auto;line-height:1.45}
+    main{display:grid;grid-template-columns:460px 1fr;gap:18px;padding:18px;max-width:1500px;margin:0 auto}
+    .card{background:rgba(24,29,37,.96);border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:18px;box-shadow:0 14px 40px rgba(0,0,0,.25)}
+    label{display:block;font-weight:700;margin:14px 0 8px}
+    input,button{width:100%;border-radius:12px;border:1px solid rgba(255,255,255,.16);background:var(--panel2);color:var(--text);padding:11px;font-size:1rem}
+    button{cursor:pointer;font-weight:800;margin-top:12px;background:linear-gradient(135deg,#4db4ff,#80ffd0);color:#071018;border:0}
+    button:disabled{opacity:.55;cursor:not-allowed}
+    .result{border-radius:12px;padding:12px;background:rgba(255,255,255,.06);line-height:1.35;border-left:6px solid var(--accent);margin-top:10px}
+    .good{border-left-color:var(--good)} .warn{border-left-color:var(--warn)} .bad{border-left-color:var(--bad)}
+    .requirements{display:grid;gap:8px;margin:12px 0}
+    .req{padding:10px;border-radius:10px;background:rgba(124,199,255,.08);border-left:6px solid var(--accent);font-size:.92rem;line-height:1.35}
+    .shotList{display:grid;gap:8px;margin-top:12px}
+    .shot{padding:10px;border-radius:10px;background:rgba(255,255,255,.06);border-left:6px solid var(--warn);font-size:.92rem}
+    .shot.done{border-left-color:var(--good);background:rgba(85,217,135,.12)}
+    .criteria{color:var(--muted);font-size:.88rem;margin-top:3px}
+    video,canvas{max-width:100%;background:#06080c;border-radius:14px;border:1px solid rgba(255,255,255,.12)}
+    video{width:100%}
+    #sourceVideo{display:none}
+    .previewGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+    .smallCanvas{width:100%;margin-top:8px}
+    .hint{color:var(--muted);font-size:.92rem;line-height:1.4;margin-top:10px}
+    @media(max-width:950px){main{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+<header>
+  <h1>5-Shot Reel Builder</h1>
+  <p class="subtitle">Upload exactly 5 shots. Each shot is analyzed with its own built-in criteria, then the best moments are crossfaded into one final reel.</p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Shot Requirements</h2>
+    <div class="requirements">
+      <div class="req"><strong>Shot 1:</strong> Wide establishing shot of the location. Show the place clearly.</div>
+      <div class="req"><strong>Shot 2:</strong> Wide shot with one person center framed.</div>
+      <div class="req"><strong>Shot 3:</strong> Two-shot with one person on the left third and one person on the right third.</div>
+      <div class="req"><strong>Shot 4:</strong> Close-up of a subject placed on a third.</div>
+      <div class="req"><strong>Shot 5:</strong> Group shot with multiple people visible.</div>
+    </div>
+
+    <label>Producer name</label>
+    <input id="producerName" type="text" placeholder="Example: Jonathan Berecz" />
+
+    <label>Upload 5 clips</label>
+    <input id="clipInput" type="file" accept="video/*" multiple />
+
+    <button id="analyzeBtn" disabled>Analyze All 5 Clips</button>
+    <button id="assembleBtn" disabled>Assemble Final Reel</button>
+
+    <p class="hint">The final file will be named with the producer name and today’s date. Best workflow: name files clip1, clip2, clip3, clip4, clip5 before uploading.</p>
+
+    <div id="feedback" class="result warn">Enter producer name and choose 5 clips to begin.</div>
+    <div id="shotList" class="shotList"></div>
+  </section>
+
+  <section class="card">
+    <h2>Chosen 2-Second Moments</h2>
+    <div id="previewGrid" class="previewGrid"></div>
+
+    <h2>Final Reel</h2>
+    <video id="finalPreview" controls playsinline></video>
+
+    <video id="sourceVideo" muted playsinline></video>
+  </section>
+</main>
+
+<script type="module">
+import {
+  FaceDetector,
+  ObjectDetector,
+  PoseLandmarker,
+  FilesetResolver
+} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/vision_bundle.mjs";
+
+const SHOT_CRITERIA = [
+  { id:"establishing", label:"Shot 1: Wide establishing shot of location" },
+  { id:"centerWidePerson", label:"Shot 2: Wide shot with person center framed" },
+  { id:"twoShotThirds", label:"Shot 3: Two-shot with one person on each third" },
+  { id:"closeThird", label:"Shot 4: Close-up of subject on a third" },
+  { id:"groupShot", label:"Shot 5: Group shot" }
+];
+
+const clipInput = document.getElementById("clipInput");
+const producerName = document.getElementById("producerName");
+const analyzeBtn = document.getElementById("analyzeBtn");
+const assembleBtn = document.getElementById("assembleBtn");
+const feedback = document.getElementById("feedback");
+const shotList = document.getElementById("shotList");
+const previewGrid = document.getElementById("previewGrid");
+const finalPreview = document.getElementById("finalPreview");
+const video = document.getElementById("sourceVideo");
+
+let faceDetector=null, objectDetector=null, poseLandmarker=null;
+let clipFiles = [];
+let bestWindows = [];
+
+show("warn","Loading detectors...");
+
+async function setup() {
+  try {
+    const vision = await FilesetResolver.forVisionTasks(
+      "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.22-rc.20250304/wasm"
+    );
+    faceDetector = await FaceDetector.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath:"https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_full_range/float16/latest/blaze_face_full_range.tflite",
+        delegate:"GPU"
+      },
+      runningMode:"IMAGE"
+    });
+    poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task",
+        delegate:"GPU"
+      },
+      runningMode:"IMAGE",
+      numPoses:8,
+      minPoseDetectionConfidence:.12,
+      minPosePresenceConfidence:.12,
+      minTrackingConfidence:.12
+    });
+    objectDetector = await ObjectDetector.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath:"https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/latest/efficientdet_lite0.tflite",
+        delegate:"GPU"
+      },
+      scoreThreshold:.05,
+      maxResults:25,
+      runningMode:"IMAGE"
+    });
+    show("good","Detectors loaded. Enter producer name and upload 5 clips.");
+  } catch(e) {
+    console.error(e);
+    show("bad","Detectors failed to load. Make sure you are online and using Chrome/Brave.");
+  }
+}
+setup();
+
+producerName.addEventListener("input", validateReady);
+clipInput.addEventListener("change", () => {
+  clipFiles = [...clipInput.files].sort((a,b)=>a.name.localeCompare(b.name, undefined, {numeric:true}));
+  bestWindows = [];
+  assembleBtn.disabled = true;
+  finalPreview.removeAttribute("src");
+  previewGrid.innerHTML = "";
+  renderShotList();
+  validateReady();
+});
+
+function validateReady() {
+  const hasName = producerName.value.trim().length > 0;
+  const hasFive = clipFiles.length === 5;
+  analyzeBtn.disabled = !(hasName && hasFive);
+  if (!hasName) show("warn","Enter a producer name.");
+  else if (!hasFive) show(clipFiles.length ? "bad" : "warn", `You selected ${clipFiles.length}. Please select exactly 5 clips.`);
+  else show("good","Ready to analyze all 5 shots.");
+}
+
+analyzeBtn.addEventListener("click", analyzeAll);
+assembleBtn.addEventListener("click", assembleFinal);
+
+async function analyzeAll() {
+  analyzeBtn.disabled = true;
+  assembleBtn.disabled = true;
+  bestWindows = [];
+  previewGrid.innerHTML = "";
+
+  for (let i=0; i<clipFiles.length; i++) {
+    show("warn",`Analyzing ${SHOT_CRITERIA[i].label}: ${clipFiles[i].name}`);
+    const best = await analyzeOneClip(clipFiles[i], i);
+    bestWindows.push(best);
+    renderShotList();
+    await drawChosenFrame(clipFiles[i], best, i);
+  }
+
+  show("good","Analysis complete. Ready to assemble final reel.");
+  assembleBtn.disabled = false;
+  analyzeBtn.disabled = false;
+}
+
+async function analyzeOneClip(file, shotIndex) {
+  await loadVideoFile(file);
+
+  const step = 0.5;
+  const duration = Math.max(0, video.duration - 2);
+  const starts = [];
+  for (let t=0; t<=duration; t+=step) starts.push(Number(t.toFixed(2)));
+  if (!starts.length) starts.push(0);
+
+  const results = [];
+  for (const start of starts) {
+    results.push(await scoreWindow(start, shotIndex));
+  }
+
+  return pickBestWindow(results);
+}
+
+function pickBestWindow(results) {
+  const sorted = [...results].sort((a,b) => {
+    const aAdjusted = a.score - Math.max(0, a.drift - 12);
+    const bAdjusted = b.score - Math.max(0, b.drift - 12);
+    return bAdjusted - aAdjusted;
+  });
+  return sorted[0];
+}
+
+async function scoreWindow(start, shotIndex) {
+  const sampleTimes = [start, start+0.4, start+1.0, start+1.6].filter(t => t <= video.duration);
+  const frameScores = [];
+  const xPositions = [];
+  const yPositions = [];
+
+  for (const t of sampleTimes) {
+    await seek(t);
+    const frame = capture();
+    const detections = detectSubjects(frame);
+    const scored = scoreFrameByShot(frame, detections, shotIndex);
+    frameScores.push(scored);
+    if (scored.primary) {
+      xPositions.push(scored.primary.centerX / scored.primary.sourceW);
+      yPositions.push(scored.primary.centerY / scored.primary.sourceH);
+    }
+  }
+
+  const avg = Math.round(frameScores.reduce((s,f)=>s+f.score,0)/frameScores.length);
+  const minScore = Math.min(...frameScores.map(f => f.score));
+  const xDrift = xPositions.length > 1 ? (Math.max(...xPositions)-Math.min(...xPositions))*100 : 0;
+  const yDrift = yPositions.length > 1 ? (Math.max(...yPositions)-Math.min(...yPositions))*100 : 0;
+  const drift = Math.round(xDrift + yDrift * .6);
+  const consistencyBonus = minScore >= 70 ? 4 : minScore >= 55 ? 1 : -5;
+  const stabilityBonus = drift <= 10 ? 5 : drift <= 18 ? 2 : -7;
+  const finalScore = Math.max(0, Math.min(100, avg + stabilityBonus + consistencyBonus));
+  const bestFrame = [...frameScores].sort((a,b)=>b.score-a.score)[0];
+
+  return {
+    start,
+    score: finalScore,
+    drift,
+    primary: bestFrame.primary,
+    subjects: bestFrame.subjects || [],
+    notes: [
+      `Average: ${avg}%`,
+      `Lowest sample: ${minScore}%`,
+      `Drift: ${drift}%`
+    ]
+  };
+}
+
+function scoreFrameByShot(c, subjects, shotIndex) {
+  if (shotIndex === 0) return scoreEstablishing(c, subjects);
+  if (shotIndex === 1) return scoreCenterWidePerson(c, subjects);
+  if (shotIndex === 2) return scoreTwoShotThirds(c, subjects);
+  if (shotIndex === 3) return scoreCloseThird(c, subjects);
+  return scoreGroupShot(c, subjects);
+}
+
+function baseImagePoints(c) {
+  return portraitPoints(c, 15).points + exposurePoints(measureBrightness(c), 15).points;
+}
+
+function scoreEstablishing(c, subjects) {
+  let points = baseImagePoints(c) + 45;
+  const primary = subjects[0] || null;
+  if (!primary) points += 25;
+  else if (primary.areaRatio < .12) points += 25;
+  else if (primary.areaRatio < .25) points += 15;
+  else points += 5;
+  return { score: Math.min(100, Math.round(points)), primary, subjects };
+}
+
+function scoreCenterWidePerson(c, subjects) {
+  const primary = subjects[0] || null;
+  let points = baseImagePoints(c);
+  if (!primary) return { score: Math.round(points*.45), primary:null, subjects };
+  points += centerPoints(primary.centerX/primary.sourceW, 30).points;
+  points += widePersonSizePoints(primary, 25).points;
+  points += sharpnessPoints(c, primary, 15).points;
+  points += feetToHeadBonus(primary, 15);
+  return { score: Math.min(100, Math.round(points)), primary, subjects };
+}
+
+function scoreTwoShotThirds(c, subjects) {
+  let points = baseImagePoints(c);
+  const people = subjects.slice(0,4);
+  if (people.length < 2) return { score: Math.round(points*.5), primary:people[0]||null, subjects };
+  const leftTarget = 1/3, rightTarget = 2/3;
+  const pairs = [];
+  for (let i=0;i<people.length;i++) for (let j=i+1;j<people.length;j++) pairs.push([people[i],people[j]]);
+  let best = {points:0, pair:pairs[0]};
+  for (const pair of pairs) {
+    const xs = pair.map(p=>p.centerX/p.sourceW).sort((a,b)=>a-b);
+    const thirdScore = Math.max(0, 40 - (Math.abs(xs[0]-leftTarget)+Math.abs(xs[1]-rightTarget))*100);
+    const balance = Math.max(0, 20 - Math.abs(pair[0].areaRatio-pair[1].areaRatio)*140);
+    const spacing = (xs[1]-xs[0]>.22 && xs[1]-xs[0]<.55) ? 20 : 8;
+    const total = thirdScore + balance + spacing;
+    if (total > best.points) best = {points:total, pair};
+  }
+  points += best.points;
+  return { score: Math.min(100, Math.round(points)), primary:best.pair[0], subjects:best.pair };
+}
+
+function scoreCloseThird(c, subjects) {
+  const primary = subjects[0] || null;
+  let points = baseImagePoints(c);
+  if (!primary) return { score: Math.round(points*.45), primary:null, subjects };
+  points += thirdPoints(primary.centerX/primary.sourceW, 30).points;
+  points += closeSizePoints(primary, 30).points;
+  points += sharpnessPoints(c, primary, 25).points;
+  return { score: Math.min(100, Math.round(points)), primary, subjects };
+}
+
+function scoreGroupShot(c, subjects) {
+  let points = baseImagePoints(c);
+  const count = subjects.length;
+  if (count >= 3) points += 40;
+  else if (count === 2) points += 22;
+  else if (count === 1) points += 8;
+  const totalArea = subjects.reduce((s,p)=>s+p.areaRatio,0);
+  if (totalArea >= .08 && totalArea <= .55) points += 25;
+  else points += 10;
+  if (subjects.length) {
+    const xs = subjects.map(p=>p.centerX/p.sourceW);
+    const spread = Math.max(...xs)-Math.min(...xs);
+    points += spread > .25 ? 20 : 8;
+  }
+  return { score: Math.min(100, Math.round(points)), primary:subjects[0]||null, subjects };
+}
+
+function detectSubjects(sourceCanvas) {
+  const subjects = [];
+  try {
+    const faces = faceDetector?.detect(sourceCanvas)?.detections || [];
+    subjects.push(...faces.map(d => subjectFromBox(expandFaceBox(d.boundingBox, sourceCanvas.width, sourceCanvas.height), sourceCanvas.width, sourceCanvas.height, "face")));
+  } catch {}
+  try {
+    const poses = poseLandmarker?.detect(sourceCanvas)?.landmarks || [];
+    subjects.push(...poses.map(lm => subjectFromPose(lm, sourceCanvas.width, sourceCanvas.height)).filter(Boolean));
+  } catch {}
+  try {
+    const objs = objectDetector?.detect(sourceCanvas)?.detections || [];
+    subjects.push(...objs.filter(d => (d.categories||[]).some(c => String(c.categoryName).toLowerCase()==="person"))
+      .map(d => subjectFromBox(d.boundingBox, sourceCanvas.width, sourceCanvas.height, "person")));
+  } catch {}
+  return dedupe(subjects, sourceCanvas.width, sourceCanvas.height);
+}
+
+function expandFaceBox(b,w,h) {
+  const cx=b.originX+b.width/2, cy=b.originY+b.height/2;
+  const bw=b.width*2.2, bh=b.height*4.4;
+  const x=Math.max(0,cx-bw/2), y=Math.max(0,cy-bh*.28);
+  return {originX:x, originY:y, width:Math.min(w-x,bw), height:Math.min(h-y,bh)};
+}
+
+function subjectFromPose(lm,w,h) {
+  const visible = lm.filter(pt => (pt.visibility ?? 1)>.10 && pt.x>=-.15 && pt.x<=1.15 && pt.y>=-.15 && pt.y<=1.15);
+  if (visible.length<5) return null;
+  let minX=Math.min(...visible.map(p=>p.x))*w, maxX=Math.max(...visible.map(p=>p.x))*w;
+  let minY=Math.min(...visible.map(p=>p.y))*h, maxY=Math.max(...visible.map(p=>p.y))*h;
+  const padX=(maxX-minX)*.22, padY=(maxY-minY)*.18;
+  const x=Math.max(0,minX-padX), y=Math.max(0,minY-padY);
+  const right=Math.min(w,maxX+padX), bottom=Math.min(h,maxY+padY);
+  return subjectFromBox({originX:x,originY:y,width:right-x,height:bottom-y},w,h,"pose");
+}
+
+function subjectFromBox(b,w,h,kind) {
+  return {x:b.originX,y:b.originY,width:b.width,height:b.height,centerX:b.originX+b.width/2,centerY:b.originY+b.height/2,areaRatio:(b.width*b.height)/(w*h),sourceW:w,sourceH:h,kind};
+}
+
+function dedupe(subjects,w,h) {
+  const clean = subjects.filter(Boolean).filter(s=>s.width>w*.01&&s.height>h*.02).sort((a,b)=>b.areaRatio-a.areaRatio);
+  const kept=[];
+  for (const s of clean) {
+    if (!kept.some(k => Math.hypot(s.centerX-k.centerX,s.centerY-k.centerY)<Math.min(w,h)*.045 || iou(s,k)>.55)) kept.push(s);
+  }
+  return kept;
+}
+
+function iou(a,b) {
+  const x1=Math.max(a.x,b.x), y1=Math.max(a.y,b.y), x2=Math.min(a.x+a.width,b.x+b.width), y2=Math.min(a.y+a.height,b.y+b.height);
+  const inter=Math.max(0,x2-x1)*Math.max(0,y2-y1);
+  const union=a.width*a.height+b.width*b.height-inter;
+  return union?inter/union:0;
+}
+
+function portraitPoints(c,max=15) {
+  const r=c.width/c.height;
+  if (r>=.52&&r<=.62) return {points:max};
+  if (r<.8) return {points:Math.round(max*.65)};
+  return {points:Math.round(max*.2)};
+}
+function centerPoints(x,max=25) {
+  if (x>=.38&&x<=.62) return {points:max};
+  return {points:Math.round(max*.4)};
+}
+function thirdPoints(x,max=25) {
+  const d = Math.min(Math.abs(x-1/3), Math.abs(x-2/3));
+  if (d <= .08) return {points:max};
+  if (d <= .16) return {points:Math.round(max*.65)};
+  return {points:Math.round(max*.25)};
+}
+function widePersonSizePoints(s,max=25) {
+  if (s.areaRatio>=.025&&s.areaRatio<=.22) return {points:max};
+  return {points:Math.round(max*.45)};
+}
+function closeSizePoints(s,max=30) {
+  if (s.areaRatio>=.12&&s.areaRatio<=.55) return {points:max};
+  if (s.areaRatio>=.07&&s.areaRatio<=.65) return {points:Math.round(max*.65)};
+  return {points:Math.round(max*.3)};
+}
+function feetToHeadBonus(s,max=15) {
+  const hRatio = s.height / s.sourceH;
+  if (hRatio >= .45 && hRatio <= .9) return max;
+  return Math.round(max*.45);
+}
+function exposurePoints(exp,max=15) {
+  if (exp.avg>=45&&exp.avg<=210&&exp.darkPct<.35&&exp.brightPct<.20) return {points:max};
+  return {points:Math.round(max*.55)};
+}
+function measureBrightness(c) {
+  const s=document.createElement("canvas"), x=s.getContext("2d");
+  s.width=160; s.height=Math.round(160*c.height/c.width);
+  x.drawImage(c,0,0,s.width,s.height);
+  const data=x.getImageData(0,0,s.width,s.height).data;
+  let sum=0,dark=0,bright=0,total=data.length/4;
+  for(let i=0;i<data.length;i+=4){const l=data[i]*.299+data[i+1]*.587+data[i+2]*.114;sum+=l;if(l<25)dark++;if(l>235)bright++}
+  return {avg:sum/total,darkPct:dark/total,brightPct:bright/total};
+}
+function sharpnessPoints(c,s,max=20) {
+  const crop = cropSubject(c,s);
+  if (!crop) return {points:Math.round(max*.4)};
+  const v = lapVar(crop);
+  if (v>=110) return {points:max};
+  if (v>=55) return {points:Math.round(max*.65)};
+  return {points:Math.round(max*.3)};
+}
+function cropSubject(c,s) {
+  const crop=document.createElement("canvas"), x=crop.getContext("2d");
+  const ix=s.width*.18, iy=s.height*.18;
+  const sx=Math.max(0,Math.round(s.x+ix)), sy=Math.max(0,Math.round(s.y+iy));
+  const sw=Math.min(c.width-sx,Math.round(s.width-ix*2)), sh=Math.min(c.height-sy,Math.round(s.height-iy*2));
+  if(sw<=0||sh<=0)return null;
+  const scale=Math.min(1,240/Math.max(sw,sh));
+  crop.width=Math.max(12,Math.round(sw*scale)); crop.height=Math.max(12,Math.round(sh*scale));
+  x.drawImage(c,sx,sy,sw,sh,0,0,crop.width,crop.height);
+  return x.getImageData(0,0,crop.width,crop.height);
+}
+function lapVar(img) {
+  const {data,width,height}=img, gray=new Float32Array(width*height);
+  for(let i=0,p=0;i<data.length;i+=4,p++) gray[p]=data[i]*.299+data[i+1]*.587+data[i+2]*.114;
+  const vals=[];
+  for(let y=1;y<height-1;y++) for(let x=1;x<width-1;x++){const idx=y*width+x; vals.push(-4*gray[idx]+gray[idx-1]+gray[idx+1]+gray[idx-width]+gray[idx+width]);}
+  if(!vals.length)return 0;
+  const mean=vals.reduce((a,b)=>a+b,0)/vals.length;
+  return Math.round(vals.reduce((s,v)=>s+(v-mean)**2,0)/vals.length);
+}
+
+async function assembleFinal() {
+  if (clipFiles.length !== 5 || bestWindows.length !== 5) return;
+  assembleBtn.disabled = true;
+  show("warn","Assembling final 5-shot reel with crossfades...");
+
+  const form = new FormData();
+  clipFiles.forEach(file => form.append("clips", file, file.name));
+  form.append("starts_json", JSON.stringify(bestWindows.map(w => w.start)));
+  form.append("producer_name", producerName.value.trim());
+
+  const res = await fetch("/api/assemble", { method:"POST", body:form });
+  let data;
+  try { data = await res.json(); } catch { data = {}; }
+
+  if (!res.ok || !data.ok) {
+    show("bad",`Assembly failed: ${data.detail || data.error || "unknown error"}`);
+    assembleBtn.disabled = false;
+    return;
+  }
+
+  finalPreview.src = data.preview_url + "?t=" + Date.now();
+  show("good",`Final reel ready: <strong>${data.filename}</strong><br><a href="${data.download_url}" download>Download final reel</a>`);
+  assembleBtn.disabled = false;
+}
+
+function loadVideoFile(file) {
+  return new Promise(resolve => {
+    video.src = URL.createObjectURL(file);
+    video.onloadedmetadata = () => resolve();
+  });
+}
+
+async function drawChosenFrame(file, best, index) {
+  await loadVideoFile(file);
+  await seek(best.start);
+  const c = document.createElement("canvas");
+  const maxW = 360;
+  const scale = video.videoWidth > maxW ? maxW / video.videoWidth : 1;
+  c.width = Math.round(video.videoWidth * scale);
+  c.height = Math.round(video.videoHeight * scale);
+  c.className = "smallCanvas";
+  const x = c.getContext("2d");
+  x.drawImage(video,0,0,c.width,c.height);
+  drawThirdsOnCanvas(x,c.width,c.height);
+  drawSubjectsOnCanvas(x,c,best.subjects || (best.primary ? [best.primary] : []));
+  const wrap = document.createElement("div");
+  wrap.className = "card";
+  wrap.innerHTML = `<strong>${SHOT_CRITERIA[index].label}</strong><br>${file.name}<br>Best: ${best.start.toFixed(2)}s–${(best.start+2).toFixed(2)}s<br>Score: ${best.score}%<br>${best.notes.join(" · ")}`;
+  wrap.appendChild(c);
+  previewGrid.appendChild(wrap);
+}
+function drawThirdsOnCanvas(x,w,h) {
+  x.strokeStyle = "rgba(255,255,255,.7)";
+  x.lineWidth = 1;
+  x.beginPath();
+  x.moveTo(w/3,0); x.lineTo(w/3,h);
+  x.moveTo(w*2/3,0); x.lineTo(w*2/3,h);
+  x.moveTo(0,h/3); x.lineTo(w,h/3);
+  x.moveTo(0,h*2/3); x.lineTo(w,h*2/3);
+  x.stroke();
+}
+function drawSubjectsOnCanvas(x,c,subjects) {
+  x.strokeStyle="#55d987";
+  x.lineWidth=3;
+  subjects.forEach(s => {
+    const sx=c.width/s.sourceW, sy=c.height/s.sourceH;
+    x.strokeRect(s.x*sx,s.y*sy,s.width*sx,s.height*sy);
+  });
+}
+function renderShotList() {
+  shotList.innerHTML = "";
+  for (let i=0; i<clipFiles.length; i++) {
+    const d = document.createElement("div");
+    d.className = "shot " + (bestWindows[i] ? "done" : "");
+    d.innerHTML = `<strong>${clipFiles[i].name}</strong><div class="criteria">${SHOT_CRITERIA[i]?.label || "Extra clip"}</div>` +
+      (bestWindows[i] ? `<br>Best: ${bestWindows[i].start.toFixed(2)}s–${(bestWindows[i].start+2).toFixed(2)}s · ${bestWindows[i].score}%` : "");
+    shotList.appendChild(d);
+  }
+}
+function capture(){const c=document.createElement("canvas");c.width=video.videoWidth;c.height=video.videoHeight;c.getContext("2d").drawImage(video,0,0,c.width,c.height);return c;}
+function seek(t){return new Promise(resolve=>{const h=()=>{video.removeEventListener("seeked",h);resolve()};video.addEventListener("seeked",h);video.currentTime=t;});}
+function show(type,msg){feedback.className=`result ${type}`;feedback.innerHTML=msg;}
+</script>
+</body>
+</html>
